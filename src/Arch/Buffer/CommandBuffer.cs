@@ -350,6 +350,7 @@ public sealed partial class CommandBuffer : IDisposable
                 }
 
                 var chunkArray = chunk.GetArray(sparseArray.Type);
+                var oldValue = chunkArray.GetValue(chunkIndex);
                 Array.Copy(sparseArray.Components, sparseArray.Entities[id], chunkArray, chunkIndex, 1);
 
 #if EVENTS
@@ -360,7 +361,7 @@ public sealed partial class CommandBuffer : IDisposable
                 }
                 else
                 {
-                    world.OnComponentSet(entity, sparseArray.Type);
+                    world.OnComponentSet(entity, sparseArray.Type, oldValue);
                 }
 #endif
             }

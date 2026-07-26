@@ -18,10 +18,14 @@ public partial class World
         var parameters = AppendGenericInDefaultParams(index);
         var inParameters = InsertGenericInParams(index);
 
+        var oldValues = new StringBuilder();
+        var newValues = new StringBuilder();
         var events = new StringBuilder();
         for (var i = 0; i < index; i++)
         {
-            events.AppendLine($"OnComponentSet<T{i}>(entity);");
+            oldValues.AppendLine($"var oldT{i} = archetype.Get<T{i}>(ref slot);");
+            newValues.AppendLine($"ref var newT{i} = ref archetype.Get<T{i}>(ref slot);");
+            events.AppendLine($"OnComponentSet<T{i}>(entity, in oldT{i}, ref newT{i});");
         }
     #>
 
@@ -30,7 +34,9 @@ public partial class World
         ref var entitySlot = ref EntityInfo.GetEntityData(entity.Id);
         var slot = entitySlot.Slot;
         var archetype = entitySlot.Archetype;
+        <#= Indent(oldValues, 8) #>
         archetype.Set<<#= generics #>>(ref slot,  <#= inParameters #>);
+        <#= Indent(newValues, 8) #>
 
         <#= Indent(events, 8) #>
     }
