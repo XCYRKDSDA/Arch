@@ -78,11 +78,30 @@ internal class StructuralSparseArray
             {
                 var lenght = Entities.Length;
                 Array.Resize(ref Entities, index + 1);
-                Array.Fill(Entities, -1, lenght, index - lenght);
+                Array.Fill(Entities, -1, lenght, index + 1 - lenght);
             }
 
-            Entities[index] = Size;
+            if (Entities[index] != -1)
+            {
+                return;
+            }
+
+            Entities[index] = 1;
             Size++;
+        }
+    }
+
+    public void Remove(int index)
+    {
+        lock (this)
+        {
+            if (index < 0 || index >= Entities.Length || Entities[index] == -1)
+            {
+                return;
+            }
+
+            Entities[index] = -1;
+            Size--;
         }
     }
 
@@ -262,7 +281,7 @@ internal class StructuralSparseSet
             EnsureTypeCapacity(componentType.Id);
             if (!HasStructuralSparseArray(componentType))
             {
-                EnsureUsedCapacity(UsedSize+1);
+                EnsureUsedCapacity(UsedSize + 1);
                 AddStructuralSparseArray(componentType);
             }
         }
@@ -288,9 +307,58 @@ internal class StructuralSparseSet
     public bool Contains<T>(int index)
     {
         var id = Component<T>.ComponentType.Id;
+        if (id >= Components.Length)
+        {
+            return false;
+        }
+
         var array = Components[id];
+        if (array is null)
+        {
+            return false;
+        }
 
         return array.Contains(index);
+    }
+
+    public void Remove<T>(int index)
+    {
+        var componentType = Component<T>.ComponentType;
+        lock (_setLock)
+        {
+            if (componentType.Id >= Components.Length)
+            {
+                return;
+            }
+
+            if (!HasStructuralSparseArray(componentType))
+            {
+                return;
+            }
+        }
+
+        var array = GetStructuralSparseArray(componentType);
+        lock (array)
+        {
+            array.Remove(index);
+        }
+    }
+
+    public void Remove(int index)
+    {
+        lock (_setLock)
+        {
+            foreach (var array in Components)
+            {
+                if (array is not null)
+                {
+                    lock (array)
+                    {
+                        array.Remove(index);
+                    }
+                }
+            }
+        }
     }
 
     /// <summary>

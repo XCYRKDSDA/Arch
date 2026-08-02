@@ -46,6 +46,8 @@ internal class SparseArray
         Size = 0;
         Entities = new int[Capacity];
         Array.Fill(Entities, -1);
+        Dense = new int[Capacity];
+        Array.Fill(Dense, -1);
         Components = ArrayRegistry.GetArray(type, Capacity);
     }
 
@@ -71,6 +73,11 @@ internal class SparseArray
     public int[] Entities;
 
     /// <summary>
+    ///     Gets the reverse mapping of positions in <see cref="Components"/> back to their sparse index.
+    /// </summary>
+    public int[] Dense;
+
+    /// <summary>
     ///     Gets an array of components contained by the <see cref="SparseArray"/>.
     /// </summary>
     public Array Components { get; private set; }
@@ -84,16 +91,27 @@ internal class SparseArray
     {
         lock (this)
         {
-            // Skip since entity fits into array
-            if (index >= Capacity)
+            // Idempotent: skip if already present
+            if (index < Entities.Length && Entities[index] != -1)
             {
-                // Calculate new array size that fits the passed index
-                var newCapacity = MathExtensions.NextPowerOfTwo(index + 1);
-                var newLength = Math.Max(Capacity, newCapacity); // keep existing capacity if already larger
+                return;
+            }
 
+            // Calculate new array size that fits the passed index and current size
+            var newLength = Math.Max(
+                MathExtensions.NextPowerOfTwo(index + 1),
+                MathExtensions.NextPowerOfTwo(Size + 1)
+            );
+
+            if (newLength > Capacity)
+            {
                 // Resize entities array
                 Array.Resize(ref Entities, newLength);
-                Array.Fill(Entities, -1, Capacity, newLength-Capacity);
+                Array.Fill(Entities, -1, Capacity, newLength - Capacity);
+
+                // Resize dense array
+                Array.Resize(ref Dense, newLength);
+                Array.Fill(Dense, -1, Capacity, newLength - Capacity);
 
                 // Resize component array
                 var array = ArrayRegistry.GetArray(Type, newLength);
@@ -103,7 +121,32 @@ internal class SparseArray
             }
 
             Entities[index] = Size;
+            Dense[Size] = index;
             Size++;
+        }
+    }
+
+    public void Remove(int index)
+    {
+        lock (this)
+        {
+            if (index < 0 || index >= Entities.Length || Entities[index] == -1)
+            {
+                return;
+            }
+
+            var pos = Entities[index];
+            var last = Size - 1;
+            if (pos != last)
+            {
+                var lastIndex = Dense[last];
+                Array.Copy(Components, last, Components, pos, 1);
+                Entities[lastIndex] = pos;
+                Dense[pos] = lastIndex;
+            }
+
+            Entities[index] = -1;
+            Size--;
         }
     }
 
@@ -165,6 +208,7 @@ internal class SparseArray
     public void Clear()
     {
         Array.Fill(Entities, -1, 0, Entities.Length);
+        Array.Fill(Dense, -1, 0, Dense.Length);
         Size = 0;
     }
 }
@@ -330,7 +374,7 @@ internal class SparseSet
             EnsureTypeCapacity(componentType.Id);
             if (!HasSparseArray(componentType))
             {
-                EnsureUsedCapacity(UsedSize+1);
+                EnsureUsedCapacity(UsedSize + 1);
                 AddSparseArray(componentType);
             }
         }
@@ -358,7 +402,16 @@ internal class SparseSet
     public bool Contains<T>(int index)
     {
         var id = Component<T>.ComponentType.Id;
+        if (id >= Components.Length)
+        {
+            return false;
+        }
+
         var array = Components[id];
+        if (array is null)
+        {
+            return false;
+        }
 
         return array.Contains(index);
     }
@@ -378,6 +431,46 @@ internal class SparseSet
         var array = Components[id];
 
         return ref array.Get<T>(index);
+    }
+
+    public void Remove<T>(int index)
+    {
+        var componentType = Component<T>.ComponentType;
+        if (componentType.Id >= Components.Length)
+        {
+            return;
+        }
+
+        lock (_setLock)
+        {
+            if (!HasSparseArray(componentType))
+            {
+                return;
+            }
+        }
+
+        var array = GetSparseArray(componentType);
+        lock (array)
+        {
+            array.Remove(index);
+        }
+    }
+
+    public void Remove(int index)
+    {
+        lock (_setLock)
+        {
+            foreach (var array in Components)
+            {
+                if (array is not null)
+                {
+                    lock (array)
+                    {
+                        array.Remove(index);
+                    }
+                }
+            }
+        }
     }
 
     /// <summary>
