@@ -217,6 +217,120 @@ public sealed partial class CommandBufferTest
 
         World.Destroy(world);
     }
+
+    [Test]
+    public void CommandBufferCreateThenDestroyCancelsBufferedEntity()
+    {
+        var world = World.Create();
+        using var buffer = new CommandBuffer();
+
+        var entity = buffer.Create([typeof(Transform), typeof(Rotation)]);
+        buffer.Destroy(entity);
+
+        // 已销毁实体上的后续操作静默忽略（不产生记录、不抛异常）
+        buffer.Add<Ai>(entity);
+        buffer.Set(entity, new Transform { X = 10, Y = 10 });
+        buffer.Remove<Transform>(entity);
+        buffer.Playback(world);
+
+        That(world.Size, Is.EqualTo(0));
+
+        World.Destroy(world);
+    }
+
+    [Test]
+    public void CommandBufferCreateAddThenDestroyCancelsBufferedEntity()
+    {
+        var world = World.Create();
+        using var buffer = new CommandBuffer();
+
+        var entity = buffer.Create([typeof(Transform)]);
+        buffer.Add<Ai>(entity);
+        buffer.Destroy(entity);
+
+        buffer.Playback(world);
+
+        That(world.Size, Is.EqualTo(0));
+
+        World.Destroy(world);
+    }
+
+    [Test]
+    public void CommandBufferDoubleDestroy()
+    {
+        var world = World.Create();
+        using var buffer = new CommandBuffer();
+
+        var entity = buffer.Create([typeof(Transform)]);
+        buffer.Destroy(entity);
+        buffer.Destroy(entity);
+
+        buffer.Playback(world);
+
+        That(world.Size, Is.EqualTo(0));
+
+        World.Destroy(world);
+    }
+
+    [Test]
+    public void CommandBufferDuplicateAdd()
+    {
+        var world = World.Create();
+        using var buffer = new CommandBuffer();
+
+        var entity = buffer.Create([typeof(Transform)]);
+        buffer.Add<Ai>(entity);
+        buffer.Add<Ai>(entity);
+
+        buffer.Playback(world);
+
+        entity = new Entity(0, 0);
+        That(world.Size, Is.EqualTo(1));
+        IsTrue(world.Has<Ai>(entity));
+        IsTrue(world.Has<Transform>(entity));
+        That(world.GetSignature(entity).Count, Is.EqualTo(2));
+
+        World.Destroy(world);
+    }
+
+    [Test]
+    public void CommandBufferRemoveFromBufferedEntity()
+    {
+        var world = World.Create();
+        using var buffer = new CommandBuffer();
+
+        var entity = buffer.Create([typeof(Transform)]);
+        buffer.Remove<Transform>(entity);
+
+        buffer.Playback(world);
+
+        entity = new Entity(0, 0);
+        That(world.Size, Is.EqualTo(1));
+        IsTrue(world.IsAlive(entity));
+        IsFalse(world.Has<Transform>(entity));
+
+        World.Destroy(world);
+    }
+
+    [Test]
+    public void CommandBufferRemoveAfterSetFromBufferedEntity()
+    {
+        var world = World.Create();
+        using var buffer = new CommandBuffer();
+
+        var entity = buffer.Create([typeof(Transform)]);
+        buffer.Set(entity, new Transform { X = 10, Y = 10 });
+        buffer.Remove<Transform>(entity);
+
+        buffer.Playback(world);
+
+        entity = new Entity(0, 0);
+        That(world.Size, Is.EqualTo(1));
+        IsTrue(world.IsAlive(entity));
+        IsFalse(world.Has<Transform>(entity));
+
+        World.Destroy(world);
+    }
 }
 
 [TestFixture]

@@ -1,12 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using Arch.Core;
 using Arch.Core.Extensions;
 using Arch.Core.Extensions.Internal;
 using Arch.Core.Utils;
 using Collections.Pooled;
+using CommunityToolkit.HighPerformance;
 
 namespace Arch.Buffer;
 
@@ -17,7 +19,7 @@ namespace Arch.Buffer;
 public readonly record struct CreateCommand
 {
     public readonly int Index;
-    public readonly ComponentType[] Types;
+    public readonly HashSet<ComponentType> Types;
 
     /// <summary>
     ///     Initializes a new instance of the <see cref="CreateCommand"/> struct.
@@ -27,7 +29,7 @@ public readonly record struct CreateCommand
     public CreateCommand(int index, ComponentType[] types)
     {
         Index = index;
-        Types = types;
+        Types = new HashSet<ComponentType>(types);
     }
 }
 
@@ -199,7 +201,31 @@ public sealed partial class CommandBuffer : IDisposable
                 Register(entity, out info);
             }
 
-            Destroys.Add(info.Index);
+            if (entity.Id < 0)
+            {
+                // 如果是负数 id，即实体为 CommandBuffer 新创建的
+                var ci = Creates.FindIndex(c => c.Index == info.Index); // TODO 待优化
+                if (ci >= 0)
+                {
+                    // 如果有对应的创建命令，则直接移除该命令
+                    Creates.RemoveAt(ci);
+                }
+                else
+                {
+                    // 否则说明该实体已经被 Destroy 过，静默忽略
+                    return;
+                }
+            }
+            else
+            {
+                // 如果不是 CommandBuffer 新创建的实体，才添加 Destroy 命令
+                Destroys.Add(info.Index);
+            }
+
+            // 不管怎么样，总是移除对应的 Sets、Adds 和 Removes 集合中的内容
+            Sets.Remove(info.SetIndex);
+            Adds.Remove(info.AddIndex);
+            Removes.Remove(info.RemoveIndex);
         }
     }
 
@@ -221,6 +247,28 @@ public sealed partial class CommandBuffer : IDisposable
             {
                 Register(entity, out info);
             }
+        }
+
+        if (entity.Id < 0)
+        {
+            // 如果是负数 id，即实体为 CommandBuffer 新创建的
+            var ci = Creates.FindIndex(c => c.Index == info.Index); // TODO 待优化
+            if (ci < 0)
+            {
+                // 如果没有 CreateCommand，说明该实体已经被 Destroy 过，静默忽略
+                return;
+            }
+        }
+        else if (Destroys.Contains(info.Index))
+        {
+            // 如果是正数 id 且已经登记销毁，说明该实体已经被 Destroy 过，静默忽略
+            return;
+        }
+
+        if (Removes.Contains<T>(info.RemoveIndex))
+        {
+            // 如果已经 Remove 过，则抛弃此次 Set 操作
+            return;
         }
 
         Sets.Set(info.SetIndex, in component);
@@ -246,7 +294,35 @@ public sealed partial class CommandBuffer : IDisposable
             }
         }
 
-        Adds.Set<T>(info.AddIndex);
+        if (entity.Id < 0)
+        {
+            // 如果是负数 id，即实体为 CommandBuffer 新创建的
+            var ci = Creates.FindIndex(c => c.Index == info.Index); // TODO 待优化
+            if (ci >= 0)
+            {
+                // 如果有对应的创建命令，则直接追加到创建命令中
+                Creates[ci].Types.Add(Component<T>.ComponentType);
+            }
+            else
+            {
+                // 否则说明该实体已经被 Destroy 过，静默忽略
+                return;
+            }
+        }
+        else if (Destroys.Contains(info.Index))
+        {
+            // 如果是正数 id 且已经登记销毁，说明该实体已经被 Destroy 过，静默忽略
+            return;
+        }
+        else
+        {
+            // 否则记录到 Adds 集合
+            Adds.Set<T>(info.AddIndex);
+        }
+
+        // 抛弃之前的 remove 记录
+        Removes.Remove<T>(info.RemoveIndex);
+
         Sets.Set(info.SetIndex, in component);
     }
 
@@ -268,7 +344,34 @@ public sealed partial class CommandBuffer : IDisposable
             }
         }
 
-        Removes.Set<T>(info.RemoveIndex);
+        if (entity.Id < 0)
+        {
+            // 如果是负数 id，即实体为 CommandBuffer 新创建的
+            var ci = Creates.FindIndex(c => c.Index == info.Index); // TODO 待优化
+            if (ci >= 0)
+            {
+                // 如果有对应的创建命令，则直接从创建命令中移除
+                Creates[ci].Types.Remove(Component<T>.ComponentType);
+            }
+            else
+            {
+                // 否则说明该实体已经被 Destroy 过，静默忽略
+                return;
+            }
+        }
+        else if (Destroys.Contains(info.Index))
+        {
+            // 如果是正数 id 且已经登记销毁，说明该实体已经被 Destroy 过，静默忽略
+            return;
+        }
+        else
+        {
+            Removes.Set<T>(info.RemoveIndex);
+        }
+
+        // 抛弃之前的 add 和 set 记录
+        Adds.Remove<T>(info.AddIndex);
+        Sets.Remove<T>(info.SetIndex);
     }
 
     /// <summary>
@@ -286,15 +389,26 @@ public sealed partial class CommandBuffer : IDisposable
         int createCount = Creates.Count;
         foreach (var cmd in Creates)
         {
-            var entity = world.Create(cmd.Types);
+            var entity = CreateWithoutEvents(world, new Signature([.. cmd.Types]));
             Entities[cmd.Index] = entity;
         }
 
         // Play back additions.
+        // Add<T> 在记录期总是会调用 Sets.Set 写入值（见上方 Add<T>），所以凡是 Add 过的组件类型，
+        // 一定会在 Sets 稀疏集中留下记录。因此 Adds 阶段只负责把组件实际添加到实体上（结构变更），
+        // 不在这里触发事件；事件统一在后面的 Sets 阶段处理。
         int addCount = Adds.Count;
         for (var index = 0; index < addCount; index++)
         {
             var wrappedEntity = Adds.Entities[index];
+            var entity = Resolve(wrappedEntity.Entity);
+            // 新建实体被取消创建后，其占位符未被替换成真实实体，Resolve 返回的仍是负 id 实体。
+            // 该实体从未真正创建，不触发任何事件。
+            if (entity.Id < 0)
+            {
+                continue;
+            }
+
             for (var i = 0; i < Adds.UsedSize; i++)
             {
                 var usedIndex = Adds.Used[i];
@@ -313,8 +427,6 @@ public sealed partial class CommandBuffer : IDisposable
                 continue;
             }
 
-            // Resolves the entity to get the real one (e.g. for newly created negative entities and stuff).
-            var entity = Resolve(wrappedEntity.Entity);
             Debug.Assert(world.IsAlive(entity), $"CommandBuffer can not to add components to the dead {wrappedEntity.Entity}");
 
             AddRange(world, entity, _addTypes.Span);
@@ -328,6 +440,13 @@ public sealed partial class CommandBuffer : IDisposable
             // Get wrapped entity
             var wrappedEntity = Sets.Entities[index];
             var entity = Resolve(wrappedEntity.Entity);
+            // 新建实体被取消创建后，其占位符未被替换成真实实体，Resolve 返回的仍是负 id 实体。
+            // 该实体从未真正创建，跳过它，不写值。
+            if (entity.Id < 0)
+            {
+                continue;
+            }
+
             var id = wrappedEntity.Index;
 
             Debug.Assert(world.IsAlive(entity), $"CommandBuffer can not to set components to the dead {wrappedEntity.Entity}");
@@ -351,26 +470,110 @@ public sealed partial class CommandBuffer : IDisposable
 
                 var chunkArray = chunk.GetArray(sparseArray.Type);
                 Array.Copy(sparseArray.Components, sparseArray.Entities[id], chunkArray, chunkIndex, 1);
+            }
+        }
 
+        // 事件在 Sets 阶段之后统一触发：此时所有值已写入实体的数据块（chunk），且 Removes/Destroys
+        // 尚未执行，实体和组件都处于可读状态，事件处理器调用 Get<T> 能读到最终值。
+        // 触发顺序固定为：OnEntityCreated → OnComponentAdded → OnComponentSet。
 #if EVENTS
-                // Entity also exists in add and the set component was added recently
-                if (Adds.Used.Length > i && Adds.Components[Adds.Used[i]].Contains(id))
+        // 遍历创建命令：先触发 OnEntityCreated；对每个组件类型，如果它不在 Sets 稀疏集中
+        // （说明从未被 Set 过，值是默认值），则触发 OnComponentAdded。在 Sets 稀疏集中有记录的
+        // 组件类型由下方第二个循环负责触发，避免同一组件触发两次。
+        foreach (var cmd in Creates)
+        {
+            var entity = Entities[cmd.Index];
+            world.OnEntityCreated(entity);
+
+            var info = BufferedEntityInfo[-(cmd.Index + 1)];
+            foreach (var type in cmd.Types)
+            {
+                if (type.Id < Sets.Components.Length
+                    && Sets.Components[type.Id] is { } setArray
+                    && setArray.Contains(info.SetIndex))
                 {
-                    world.OnComponentAdded(entity, sparseArray.Type);
+                    continue;
+                }
+
+                world.OnComponentAdded(entity, type);
+            }
+        }
+
+        // 第二个循环：再次遍历 Sets 稀疏集，逐条判断每个写值记录应该触发 Add 还是 Set 事件。
+        // 判断依据只看 CommandBuffer 自己的操作记录：
+        //   组件在操作前不存在、操作后存在（新建实体的创建命令里，或已存在实体的 Adds 记录里）→ Add 事件，只触发一次；
+        //   组件在操作前已存在（只有 Set 记录）→ Set 事件。
+        // 数据来源按实体身份区分：新建实体（负数 id）的组件集合在创建命令的 Types 里；
+        // 已存在实体（正数 id）的新增组件记录在 Adds 稀疏集里。
+        // 外层循环遍历 Sets 稀疏集中的每个实体条目；内层循环遍历该实体有写值记录的全部组件类型。
+        for (var index = 0; index < Sets.Count; index++)
+        {
+            var wrappedEntity = Sets.Entities[index];
+            var entity = Resolve(wrappedEntity.Entity);
+            // 新建实体被取消创建后，其占位符未被替换成真实实体，Resolve 返回的仍是负 id 实体。
+            // 该实体从未真正创建，不触发任何事件。
+            if (entity.Id < 0)
+            {
+                continue;
+            }
+
+            var id = wrappedEntity.Index;
+            for (var i = 0; i < Sets.UsedSize; i++)
+            {
+                var used = Sets.Used[i];
+                var sparseArray = Sets.Components[used];
+
+                // 该实体在此组件类型上没有写值记录（例如先 Set 后又 Remove，Set 记录已被撤销）→ 跳过。
+                if (!sparseArray.Contains(id))
+                {
+                    continue;
+                }
+
+                var type = sparseArray.Type;
+                if (wrappedEntity.Entity.Id < 0)
+                {
+                    // 新建实体：它的 Add 操作都直接添加进创建命令的组件类型集合，所以 Sets 稀疏集里有写值记录的
+                    // 类型必然也在创建命令的 Types 里（Debug 断言验证这个关系）。触发 Add 事件。
+                    var createInfo = BufferedEntityInfo[wrappedEntity.Entity.Id];
+                    var ci = Creates.FindIndex(c => c.Index == createInfo.Index);
+                    Debug.Assert(ci >= 0 && Creates[ci].Types.Contains(type), "新建实体的 Sets 记录类型必在创建命令中");
+                    world.OnComponentAdded(entity, type);
                 }
                 else
                 {
-                    world.OnComponentSet(entity, sparseArray.Type);
+                    // 已存在实体：判断这个组件是否是通过 Add 操作加入的，查该实体在 Adds 稀疏集中的记录。
+                    var addInfo = BufferedEntityInfo[wrappedEntity.Entity.Id].AddIndex;
+                    if (type.Id < Adds.Components.Length
+                        && Adds.Components[type.Id] is { } addArray
+                        && addArray.Contains(addInfo))
+                    {
+                        // 组件在 Adds 稀疏集里有记录 → 本次属于新增，触发 Add 事件（Add 阶段只做了
+                        // 结构变更不触发事件，Add 事件在这里统一触发）。
+                        world.OnComponentAdded(entity, type);
+                    }
+                    else
+                    {
+                        // 组件在 Adds 稀疏集里没有记录 → 这是对已存在组件的赋值操作，触发 Set 事件。
+                        world.OnComponentSet(entity, type);
+                    }
                 }
-#endif
             }
         }
+#endif
 
         // Play back removals.
         int removeCount = Removes.Count;
         for (var index = 0; index < removeCount; index++)
         {
             var wrappedEntity = Removes.Entities[index];
+            var entity = Resolve(wrappedEntity.Entity);
+            // 新建实体被取消创建后，其占位符未被替换成真实实体，Resolve 返回的仍是负 id 实体。
+            // 该实体从未真正创建，不触发任何事件。
+            if (entity.Id < 0)
+            {
+                continue;
+            }
+
             for (var i = 0; i < Removes.UsedSize; i++)
             {
                 var usedIndex = Removes.Used[i];
@@ -388,7 +591,6 @@ public sealed partial class CommandBuffer : IDisposable
                 continue;
             }
 
-            var entity = Resolve(wrappedEntity.Entity);
             Debug.Assert(world.IsAlive(entity), $"CommandBuffer can not to remove components from the dead {wrappedEntity.Entity}");
 
             world.RemoveRange(entity, _removeTypes.Span);
@@ -487,5 +689,33 @@ public sealed partial class CommandBuffer
         }
 
         world.Move(entity, ref data, oldArchetype, newArchetype, out _);
+    }
+
+    /// <summary>
+    ///     Creates a new <see cref="Entity"/> with the given component structure without firing any events.
+    ///     Combines <see cref="World.EnsureCapacity"/>, <see cref="World.GetOrCreateEntitiesInternal"/>, <see cref="Archetype.AddAll"/> and <see cref="World.AddEntityData"/>.
+    /// </summary>
+    /// <param name="world">The world to operate on.</param>
+    /// <param name="signature">The component structure of the <see cref="Entity"/> to create.</param>
+    /// <returns>The created <see cref="Entity"/>.</returns>
+    internal static Entity CreateWithoutEvents(World world, in Signature signature)
+    {
+        // Ensure capacity of the archetype
+        var archetype = world.EnsureCapacity(in signature, 1);
+
+        // Prepare entities and data
+        using var entityArray = Pool<Entity>.Rent(1);
+        using var entityDataArray = Pool<EntityData>.Rent(1);
+        var entities = entityArray.AsSpan();
+        var entityData = entityDataArray.AsSpan();
+
+        // Create entities
+        world.GetOrCreateEntitiesInternal(archetype, entities, entityData, 1);
+        archetype.AddAll(entities, 1);
+
+        // Add entity to entityinfo
+        world.AddEntityData(entities, entityData, 1);
+
+        return entities[0];
     }
 }
