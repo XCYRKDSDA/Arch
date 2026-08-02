@@ -391,12 +391,32 @@ public sealed partial class CommandBuffer : IDisposable
         {
             var entity = CreateWithoutEvents(world, new Signature([.. cmd.Types]));
             Entities[cmd.Index] = entity;
+
+#if EVENTS
+            // 触发创建事件：先触发 OnEntityCreated；对每个组件类型，如果它不在 Sets 稀疏集中
+            // （说明从未被 Set 过，值是默认值），则触发 OnComponentAdded。在 Sets 稀疏集中有记录的
+            // 组件类型由 Sets 写值循环负责触发，避免同一组件触发两次。
+            world.OnEntityCreated(entity);
+
+            var info = BufferedEntityInfo[-(cmd.Index + 1)];
+            foreach (var type in cmd.Types)
+            {
+                if (type.Id < Sets.Components.Length
+                    && Sets.Components[type.Id] is { } setArray
+                    && setArray.Contains(info.SetIndex))
+                {
+                    continue;
+                }
+
+                world.OnComponentAdded(entity, type);
+            }
+#endif
         }
 
         // Play back additions.
         // Add<T> 在记录期总是会调用 Sets.Set 写入值（见上方 Add<T>），所以凡是 Add 过的组件类型，
         // 一定会在 Sets 稀疏集中留下记录。因此 Adds 阶段只负责把组件实际添加到实体上（结构变更），
-        // 不在这里触发事件；事件统一在后面的 Sets 阶段处理。
+        // 不在这里触发事件；Add 事件在后面的 Sets 写值循环中触发（此时值已写入，处理器能读到最终值）。
         int addCount = Adds.Count;
         for (var index = 0; index < addCount; index++)
         {
@@ -463,6 +483,7 @@ public sealed partial class CommandBuffer : IDisposable
                 var used = Sets.Used[i];
                 var sparseArray = Sets.Components[used];
 
+                // 该实体在此组件类型上没有写值记录（例如先 Set 后又 Remove，Set 记录已被撤销）→ 跳过。
                 if (!sparseArray.Contains(id))
                 {
                     continue;
@@ -470,65 +491,13 @@ public sealed partial class CommandBuffer : IDisposable
 
                 var chunkArray = chunk.GetArray(sparseArray.Type);
                 Array.Copy(sparseArray.Components, sparseArray.Entities[id], chunkArray, chunkIndex, 1);
-            }
-        }
 
-        // 事件在 Sets 阶段之后统一触发：此时所有值已写入实体的数据块（chunk），且 Removes/Destroys
-        // 尚未执行，实体和组件都处于可读状态，事件处理器调用 Get<T> 能读到最终值。
-        // 触发顺序固定为：OnEntityCreated → OnComponentAdded → OnComponentSet。
 #if EVENTS
-        // 遍历创建命令：先触发 OnEntityCreated；对每个组件类型，如果它不在 Sets 稀疏集中
-        // （说明从未被 Set 过，值是默认值），则触发 OnComponentAdded。在 Sets 稀疏集中有记录的
-        // 组件类型由下方第二个循环负责触发，避免同一组件触发两次。
-        foreach (var cmd in Creates)
-        {
-            var entity = Entities[cmd.Index];
-            world.OnEntityCreated(entity);
-
-            var info = BufferedEntityInfo[-(cmd.Index + 1)];
-            foreach (var type in cmd.Types)
-            {
-                if (type.Id < Sets.Components.Length
-                    && Sets.Components[type.Id] is { } setArray
-                    && setArray.Contains(info.SetIndex))
-                {
-                    continue;
-                }
-
-                world.OnComponentAdded(entity, type);
-            }
-        }
-
-        // 第二个循环：再次遍历 Sets 稀疏集，逐条判断每个写值记录应该触发 Add 还是 Set 事件。
-        // 判断依据只看 CommandBuffer 自己的操作记录：
-        //   组件在操作前不存在、操作后存在（新建实体的创建命令里，或已存在实体的 Adds 记录里）→ Add 事件，只触发一次；
-        //   组件在操作前已存在（只有 Set 记录）→ Set 事件。
-        // 数据来源按实体身份区分：新建实体（负数 id）的组件集合在创建命令的 Types 里；
-        // 已存在实体（正数 id）的新增组件记录在 Adds 稀疏集里。
-        // 外层循环遍历 Sets 稀疏集中的每个实体条目；内层循环遍历该实体有写值记录的全部组件类型。
-        for (var index = 0; index < Sets.Count; index++)
-        {
-            var wrappedEntity = Sets.Entities[index];
-            var entity = Resolve(wrappedEntity.Entity);
-            // 新建实体被取消创建后，其占位符未被替换成真实实体，Resolve 返回的仍是负 id 实体。
-            // 该实体从未真正创建，不触发任何事件。
-            if (entity.Id < 0)
-            {
-                continue;
-            }
-
-            var id = wrappedEntity.Index;
-            for (var i = 0; i < Sets.UsedSize; i++)
-            {
-                var used = Sets.Used[i];
-                var sparseArray = Sets.Components[used];
-
-                // 该实体在此组件类型上没有写值记录（例如先 Set 后又 Remove，Set 记录已被撤销）→ 跳过。
-                if (!sparseArray.Contains(id))
-                {
-                    continue;
-                }
-
+                // 逐条判断每个写值记录应该触发 Add 还是 Set 事件，判断依据只看 CommandBuffer 自己的操作记录：
+                //   组件在操作前不存在、操作后存在（新建实体的创建命令里，或已存在实体的 Adds 记录里）→ Add 事件，只触发一次；
+                //   组件在操作前已存在（只有 Set 记录）→ Set 事件。
+                // 数据来源按实体身份区分：新建实体（负数 id）的组件集合在创建命令的 Types 里；
+                // 已存在实体（正数 id）的新增组件记录在 Adds 稀疏集里。
                 var type = sparseArray.Type;
                 if (wrappedEntity.Entity.Id < 0)
                 {
@@ -548,7 +517,7 @@ public sealed partial class CommandBuffer : IDisposable
                         && addArray.Contains(addInfo))
                     {
                         // 组件在 Adds 稀疏集里有记录 → 本次属于新增，触发 Add 事件（Add 阶段只做了
-                        // 结构变更不触发事件，Add 事件在这里统一触发）。
+                        // 结构变更不触发事件，Add 事件在这里触发）。
                         world.OnComponentAdded(entity, type);
                     }
                     else
@@ -557,9 +526,9 @@ public sealed partial class CommandBuffer : IDisposable
                         world.OnComponentSet(entity, type);
                     }
                 }
+#endif
             }
         }
-#endif
 
         // Play back removals.
         int removeCount = Removes.Count;
