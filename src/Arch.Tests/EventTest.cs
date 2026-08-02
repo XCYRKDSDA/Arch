@@ -1,6 +1,7 @@
 ﻿using Arch.Core;
 using Arch.Core.Extensions;
 using Arch.Core.Utils;
+using Arch.Buffer;
 using static NUnit.Framework.Assert;
 
 namespace Arch.Tests;
@@ -150,7 +151,7 @@ public sealed class EventTest
     public void SetSingle()
     {
         using var world = World.Create();
-        world.SubscribeComponentSet((in Entity entity, ref EventTestComponentOne cmp) => _asserter.CompOneSet.Add((entity,cmp)));
+        world.SubscribeComponentSet((in Entity entity, in EventTestComponentOne oldValue, ref EventTestComponentOne newValue) => _asserter.CompOneSet.Add((entity, oldValue, newValue)));
 
         // Create entity to check if created and add event were fired
         var cmp = new EventTestComponentOne();
@@ -158,7 +159,7 @@ public sealed class EventTest
         world.Set(entity, cmp);
 
         _asserter.AssertEvents(compOneSet:1);
-        That(_asserter.CompOneSet, Does.Contain((entity,cmp)));
+        That(_asserter.CompOneSet, Does.Contain((entity, cmp, cmp)));
         _asserter.Clear();
     }
 
@@ -166,7 +167,7 @@ public sealed class EventTest
     public void SetSingleObject()
     {
         using var world = World.Create();
-        world.SubscribeComponentSet((in Entity entity, ref EventTestComponentOne cmp) => _asserter.CompOneSet.Add((entity,cmp)));
+        world.SubscribeComponentSet((in Entity entity, in EventTestComponentOne oldValue, ref EventTestComponentOne newValue) => _asserter.CompOneSet.Add((entity, oldValue, newValue)));
 
         // Create entity to check if created and add event were fired
         var cmp = new EventTestComponentOne();
@@ -174,7 +175,25 @@ public sealed class EventTest
         world.Set(entity, (object)cmp);
 
         _asserter.AssertEvents(compOneSet:1);
-        That(_asserter.CompOneSet, Does.Contain((entity,cmp)));
+        That(_asserter.CompOneSet, Does.Contain((entity, cmp, cmp)));
+        _asserter.Clear();
+    }
+
+    [Test]
+    public void SetSingleOldValue()
+    {
+        using var world = World.Create();
+        world.SubscribeComponentSet((in Entity entity, in EventTestComponentOne oldValue, ref EventTestComponentOne newValue) =>
+            _asserter.CompOneSet.Add((entity, oldValue, newValue)));
+
+        var entity = world.Create(new EventTestComponentOne());
+        world.Set(entity, new EventTestComponentOne());
+
+        _asserter.AssertEvents(compOneSet: 1);
+        var (e, old, @new) = _asserter.CompOneSet[0];
+        That(e, Is.EqualTo(entity));
+        That(old, Is.EqualTo(new EventTestComponentOne()));
+        That(@new, Is.EqualTo(new EventTestComponentOne()));
         _asserter.Clear();
     }
 
@@ -182,8 +201,8 @@ public sealed class EventTest
     public void SetMultiple()
     {
         using var world = World.Create();
-        world.SubscribeComponentSet((in Entity entity, ref EventTestComponentOne cmp) => _asserter.CompOneSet.Add((entity,cmp)));
-        world.SubscribeComponentSet((in Entity entity, ref EventTestComponentTwo cmp) => _asserter.CompTwoSet.Add((entity,cmp)));
+        world.SubscribeComponentSet((in Entity entity, in EventTestComponentOne oldValue, ref EventTestComponentOne newValue) => _asserter.CompOneSet.Add((entity, oldValue, newValue)));
+        world.SubscribeComponentSet((in Entity entity, in EventTestComponentTwo oldValue, ref EventTestComponentTwo newValue) => _asserter.CompTwoSet.Add((entity, oldValue, newValue)));
 
         // Create entity to check if created and add event were fired
         var cmpOne = new EventTestComponentOne();
@@ -193,8 +212,8 @@ public sealed class EventTest
         world.Set(entity, cmpOne, cmpTwo);
 
         _asserter.AssertEvents(compOneSet:1, compTwoSet:1);
-        That(_asserter.CompOneSet, Does.Contain((entity,cmpOne)));
-        That(_asserter.CompTwoSet, Does.Contain((entity,cmpTwo)));
+        That(_asserter.CompOneSet, Does.Contain((entity, cmpOne, cmpOne)));
+        That(_asserter.CompTwoSet, Does.Contain((entity, cmpTwo, cmpTwo)));
         _asserter.Clear();
     }
 
@@ -202,8 +221,8 @@ public sealed class EventTest
     public void SetMultipleObject()
     {
         using var world = World.Create();
-        world.SubscribeComponentSet((in Entity entity, ref EventTestComponentOne cmp) => _asserter.CompOneSet.Add((entity,cmp)));
-        world.SubscribeComponentSet((in Entity entity, ref EventTestComponentTwo cmp) => _asserter.CompTwoSet.Add((entity,cmp)));
+        world.SubscribeComponentSet((in Entity entity, in EventTestComponentOne oldValue, ref EventTestComponentOne newValue) => _asserter.CompOneSet.Add((entity, oldValue, newValue)));
+        world.SubscribeComponentSet((in Entity entity, in EventTestComponentTwo oldValue, ref EventTestComponentTwo newValue) => _asserter.CompTwoSet.Add((entity, oldValue, newValue)));
 
         // Create entity to check if created and add event were fired
         var cmpOne = new EventTestComponentOne();
@@ -213,8 +232,29 @@ public sealed class EventTest
         world.SetRange(entity,new object[]{cmpOne, cmpTwo});
 
         _asserter.AssertEvents(compOneSet:1, compTwoSet:1);
-        That(_asserter.CompOneSet, Does.Contain((entity,cmpOne)));
-        That(_asserter.CompTwoSet, Does.Contain((entity,cmpTwo)));
+        That(_asserter.CompOneSet, Does.Contain((entity, cmpOne, cmpOne)));
+        That(_asserter.CompTwoSet, Does.Contain((entity, cmpTwo, cmpTwo)));
+        _asserter.Clear();
+    }
+
+    [Test]
+    public void SetViaCommandBuffer()
+    {
+        using var world = World.Create();
+        world.SubscribeComponentSet((in Entity entity, in EventTestComponentOne oldValue, ref EventTestComponentOne newValue) =>
+            _asserter.CompOneSet.Add((entity, oldValue, newValue)));
+
+        var entity = world.Create(new EventTestComponentOne());
+
+        using var commandBuffer = new CommandBuffer();
+        commandBuffer.Set(entity, new EventTestComponentOne());
+        commandBuffer.Playback(world);
+
+        _asserter.AssertEvents(compOneSet: 1);
+        var (e, old, @new) = _asserter.CompOneSet[0];
+        That(e, Is.EqualTo(entity));
+        That(old, Is.EqualTo(new EventTestComponentOne()));
+        That(@new, Is.EqualTo(new EventTestComponentOne()));
         _asserter.Clear();
     }
 
@@ -310,8 +350,8 @@ public sealed class EventTest
         public readonly List<Entity> Destroyed = new();
         public readonly List<Entity> CompOneAdded = new();
         public readonly List<Entity> CompTwoAdded = new();
-        public readonly List<(Entity Entity, EventTestComponentOne Comp)> CompOneSet = new();
-        public readonly List<(Entity Entity, EventTestComponentTwo Comp)> CompTwoSet = new();
+        public readonly List<(Entity Entity, EventTestComponentOne OldValue, EventTestComponentOne NewValue)> CompOneSet = new();
+        public readonly List<(Entity Entity, EventTestComponentTwo OldValue, EventTestComponentTwo NewValue)> CompTwoSet = new();
         public readonly List<Entity> CompOneRemoved = new();
         public readonly List<Entity> CompTwoRemoved = new();
 

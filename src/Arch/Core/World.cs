@@ -854,10 +854,11 @@ public partial class World
             foreach (var index in chunk)
             {
                 ref var component = ref Unsafe.Add(ref componentFirstElement, index);
+                var oldValue = component;
                 component = value;
 #if EVENTS
                 ref var entity = ref chunk.Entity(index);
-                OnComponentSet<T>(entity);
+                OnComponentSet<T>(entity, in oldValue, ref component);
 #endif
             }
         }
@@ -1092,8 +1093,10 @@ public partial class World
         var entitySlot = EntityInfo.GetEntityData(entity.Id);
         var slot = entitySlot.Slot;
         var archetype = entitySlot.Archetype;
+        var oldValue = archetype.Get<T>(ref slot);
         archetype.Set(ref slot, in component);
-        OnComponentSet<T>(entity);
+        ref var newValue = ref archetype.Get<T>(ref slot);
+        OnComponentSet<T>(entity, in oldValue, ref newValue);
     }
 
     /// <summary>
@@ -1295,8 +1298,9 @@ public partial class World
     public void Set(Entity entity, object component)
     {
         var entitySlot = EntityInfo.GetEntityData(entity.Id);
+        var oldValue = entitySlot.Archetype.Get(ref entitySlot.Slot, (ComponentType)component.GetType());
         entitySlot.Archetype.Set(ref entitySlot.Slot, component);
-        OnComponentSet(entity, (ComponentType)component.GetType());
+        OnComponentSet(entity, (ComponentType)component.GetType(), oldValue);
     }
 
     /// <summary>
@@ -1310,8 +1314,9 @@ public partial class World
         var entitySlot = EntityInfo.GetEntityData(entity.Id);
         foreach (var cmp in components)
         {
+            var oldValue = entitySlot.Archetype.Get(ref entitySlot.Slot, (ComponentType)cmp.GetType());
             entitySlot.Archetype.Set(ref entitySlot.Slot, cmp);
-            OnComponentSet(entity, (ComponentType)cmp.GetType());
+            OnComponentSet(entity, (ComponentType)cmp.GetType(), oldValue);
         }
     }
 

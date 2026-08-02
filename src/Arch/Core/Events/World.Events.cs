@@ -104,10 +104,10 @@ public partial class World
 
         lock (events.ComponentSetHandlers)
         {
-            events.ComponentSetHandlers.Add((in Entity entity) =>
+            events.ComponentSetHandlers.Add((in Entity entity, object oldValue) =>
             {
-                ref var compGeneric = ref Get<T>(entity);
-                handler(entity, ref compGeneric);
+                ref var newValue = ref Get<T>(entity);
+                handler(in entity, (T)oldValue, ref newValue);
             });
         }
 #endif
@@ -231,11 +231,10 @@ public partial class World
     /// <param name="entity">The entity that the component was set on.</param>
     /// <typeparam name="T">The type of component that got set.</typeparam>
 
-    public void OnComponentSet<T>(Entity entity)
+    public void OnComponentSet<T>(Entity entity, in T oldValue, ref T newValue)
     {
 #if EVENTS
         ref readonly var events = ref GetEvents<T>();
-        ref var set = ref Get<T>(entity);
 
         int count;
         lock (events.ComponentSetGenericHandlers)
@@ -251,7 +250,7 @@ public partial class World
                 handler = events.ComponentSetGenericHandlers[i];
             }
 
-            handler(in entity, ref set);
+            handler(in entity, oldValue, ref newValue);
         }
 #endif
     }
@@ -327,7 +326,7 @@ public partial class World
     /// <param name="entity">The entity that the component was set on.</param>
     /// <param name="compType">The type of component that got set.</param>
 
-    public void OnComponentSet(Entity entity, ComponentType compType)
+    public void OnComponentSet(Entity entity, ComponentType compType, object oldValue)
     {
 #if EVENTS
         var events = GetEvents(compType);
@@ -350,7 +349,7 @@ public partial class World
                 handler = events.ComponentSetHandlers[i];
             }
 
-            handler(in entity);
+            handler(in entity, oldValue);
         }
 #endif
     }

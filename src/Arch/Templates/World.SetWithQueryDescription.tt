@@ -23,8 +23,9 @@ public partial class World
         var assignValuesEvents = new StringBuilder();
         for (var i = 0; i < index; i++)
         {
+            assignValues.AppendLine($"var oldT{i} = t{i}Component;");
             assignValues.AppendLine($"t{i}Component = t{i}ComponentValue;");
-            assignValuesEvents.AppendLine($"OnComponentSet<T{i}>(entity);");
+            assignValuesEvents.AppendLine($"OnComponentSet<T{i}>(entity, in oldT{i}, ref t{i}Component);");
         }
     #>
 
