@@ -385,6 +385,54 @@ public sealed partial class CommandBuffer : IDisposable
 
     public void Playback(World world, bool dispose = true)
     {
+        // Play back destructions.
+        // 播放顺序：Destroy → Remove → Create → Add → Set。
+        // 记录期已保证同一实体上的操作互斥——Destroy 会清掉该实体的 Sets/Adds/Removes 记录，
+        // 且实体被 Destroy 后对其的 Set/Add/Remove 均被静默忽略，因此先销毁不会让后续阶段
+        // 操作到已销毁的实体（各阶段另有实体 Id 为负数的 continue 保护与稀疏集的 Contains 检查兜底）。
+        int destroyCount = Destroys.Count;
+        foreach (var cmd in Destroys)
+        {
+            world.Destroy(Entities[cmd]);
+        }
+
+        // Play back removals.
+        // 被 Destroy 的实体其 Removes 记录已被清除，不会出现在这里。
+        int removeCount = Removes.Count;
+        for (var index = 0; index < removeCount; index++)
+        {
+            var wrappedEntity = Removes.Entities[index];
+            var entity = Resolve(wrappedEntity.Entity);
+            // 新建实体被取消创建后，其占位符未被替换成真实实体，Resolve 返回的仍是负 id 实体。
+            // 该实体从未真正创建，不触发任何事件。
+            if (entity.Id < 0)
+            {
+                continue;
+            }
+
+            for (var i = 0; i < Removes.UsedSize; i++)
+            {
+                var usedIndex = Removes.Used[i];
+                var sparseSet = Removes.Components[usedIndex];
+                if (!sparseSet.Contains(wrappedEntity.Index))
+                {
+                    continue;
+                }
+
+                _removeTypes.Add(sparseSet.Type);
+            }
+
+            if (_removeTypes.Count <= 0)
+            {
+                continue;
+            }
+
+            Debug.Assert(world.IsAlive(entity), $"CommandBuffer can not to remove components from the dead {wrappedEntity.Entity}");
+
+            world.RemoveRange(entity, _removeTypes.Span);
+            _removeTypes.Clear();
+        }
+
         // Create recorded entities.
         int createCount = Creates.Count;
         foreach (var cmd in Creates)
@@ -469,6 +517,24 @@ public sealed partial class CommandBuffer : IDisposable
 
             var id = wrappedEntity.Index;
 
+            // Register 总会把实体加入 Sets.Entities，而 Destroy 只清除稀疏数组中的记录（Entities
+            // 条目保留），因此无记录的死实体是销毁流程的正常残留，跳过即可——这与 Add/Remove 阶段
+            // "_addTypes.Count <= 0 → continue" 的处理一致。真正异常的是"有写值记录却已死"的实体
+            // （记录期互斥被破坏），这种情况由下面的 Debug.Assert 抛出。
+            var hasSetRecord = false;
+            for (var i = 0; i < Sets.UsedSize; i++)
+            {
+                if (Sets.Components[Sets.Used[i]].Contains(id))
+                {
+                    hasSetRecord = true;
+                    break;
+                }
+            }
+            if (!hasSetRecord)
+            {
+                continue;
+            }
+
             Debug.Assert(world.IsAlive(entity), $"CommandBuffer can not to set components to the dead {wrappedEntity.Entity}");
 
             // Get entity chunk
@@ -531,49 +597,6 @@ public sealed partial class CommandBuffer : IDisposable
             }
         }
 
-        // Play back removals.
-        int removeCount = Removes.Count;
-        for (var index = 0; index < removeCount; index++)
-        {
-            var wrappedEntity = Removes.Entities[index];
-            var entity = Resolve(wrappedEntity.Entity);
-            // 新建实体被取消创建后，其占位符未被替换成真实实体，Resolve 返回的仍是负 id 实体。
-            // 该实体从未真正创建，不触发任何事件。
-            if (entity.Id < 0)
-            {
-                continue;
-            }
-
-            for (var i = 0; i < Removes.UsedSize; i++)
-            {
-                var usedIndex = Removes.Used[i];
-                var sparseSet = Removes.Components[usedIndex];
-                if (!sparseSet.Contains(wrappedEntity.Index))
-                {
-                    continue;
-                }
-
-                _removeTypes.Add(sparseSet.Type);
-            }
-
-            if (_removeTypes.Count <= 0)
-            {
-                continue;
-            }
-
-            Debug.Assert(world.IsAlive(entity), $"CommandBuffer can not to remove components from the dead {wrappedEntity.Entity}");
-
-            world.RemoveRange(entity, _removeTypes.Span);
-            _removeTypes.Clear();
-        }
-
-        // Play back destructions.
-        int destroyCount = Destroys.Count;
-        foreach (var cmd in Destroys)
-        {
-            world.Destroy(Entities[cmd]);
-        }
-
         // Reset values.
         if (!dispose)
         {
@@ -583,25 +606,25 @@ public sealed partial class CommandBuffer : IDisposable
         Size = 0;
         Entities.Clear();
         BufferedEntityInfo.Clear();
-        if (createCount > 0)
+        if (destroyCount > 0)
         {
-            Creates.Clear();
-        }
-        if (setCount > 0)
-        {
-            Sets.Clear();
-        }
-        if (addCount > 0)
-        {
-            Adds.Clear();
+            Destroys.Clear();
         }
         if (removeCount > 0)
         {
             Removes.Clear();
         }
-        if (destroyCount > 0)
+        if (createCount > 0)
         {
-            Destroys.Clear();
+            Creates.Clear();
+        }
+        if (addCount > 0)
+        {
+            Adds.Clear();
+        }
+        if (setCount > 0)
+        {
+            Sets.Clear();
         }
         _addTypes.Clear();
         _removeTypes.Clear();

@@ -9,8 +9,9 @@ namespace Arch.Tests;
 /// <summary>
 ///     Verifies the event semantics of <see cref="CommandBuffer"/> playback.
 ///     Events are raised at the end of playback in a fixed order:
+///     <see cref="World.OnEntityDestroyed"/> → <see cref="World.OnComponentRemoved"/> →
 ///     <see cref="World.OnEntityCreated"/> → <see cref="World.OnComponentAdded"/> →
-///     <see cref="World.OnComponentSet"/> → <see cref="World.OnComponentRemoved"/> → <see cref="World.OnEntityDestroyed"/>.
+///     <see cref="World.OnComponentSet"/>.
 ///     Only counts and values are asserted; the internal order of events of the same type is not asserted.
 /// </summary>
 [TestFixture]
