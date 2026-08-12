@@ -216,6 +216,11 @@ public sealed partial class CommandBuffer : IDisposable
                     return;
                 }
             }
+            else if (Destroys.Contains(info.Index))
+            {
+                // 如果是正数 id 且已经登记销毁，说明该实体已经被 Destroy 过，静默忽略
+                return;
+            }
             else
             {
                 // 如果不是 CommandBuffer 新创建的实体，才添加 Destroy 命令
